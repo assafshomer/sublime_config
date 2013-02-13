@@ -1,0 +1,31 @@
+[
+  {
+    "keys": ["escape"],
+    "command": "alternative_autocomplete",
+    "context": [
+      {"key": "num_selections", "operator": "equal", "operand": 1},
+      {"key": "overlay_visible", "operator": "equal", "operand": false},
+      {"key": "panel_visible", "operator": "equal", "operand": false}
+    ]
+  },
+  {
+    "keys": ["shift+escape"],
+    "command": "alternative_autocomplete",
+    "args": {"cycle": "previous"},
+    "context": [
+      {"key": "num_selections", "operator": "equal", "operand": 1},
+      {"key": "overlay_visible", "operator": "equal", "operand": false},
+      {"key": "panel_visible", "operator": "equal", "operand": false}
+    ]
+  },
+  { "keys": ["ctrl+shift+."], "command": "erb" },
+  { "keys": ["command+h"], "command": "move", "args": {"by": "characters", "forward": false} },
+  { "keys": ["command+l"], "command": "move", "args": {"by": "characters", "forward": true} },
+  { "keys": ["command+k"], "command": "move", "args": {"by": "lines", "forward": false} },
+  { "keys": ["command+j"], "command": "move", "args": {"by": "lines", "forward": true} },
+  { "keys": ["command+d"], "command": "right_delete" },
+  { "keys": ["command+b"], "command": "move_to", "args": {"to": "bol", "extend": false} },
+  { "keys": ["command+e"], "command": "move_to", "args": {"to": "eol", "extend": false} },
+  { "keys": ["command+ctrl+b"], "command": "move_to", "args": {"to": "bof", "extend": false} },
+  { "keys": ["command+ctrl+e"], "command": "move_to", "args": {"to": "eof", "extend": false} }
+]

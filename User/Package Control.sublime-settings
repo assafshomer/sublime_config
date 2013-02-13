@@ -1,0 +1,13 @@
+{
+	"auto_upgrade_last_run": null,
+	"installed_packages":
+	[
+		"ERB Insert and Toggle Commands",
+		"Package Control",
+		"RubyTest"
+	],
+	"repositories":
+	[
+		"git@github.com:eddorre/SublimeERB.git"
+	]
+}
