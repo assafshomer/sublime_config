@@ -27,5 +27,7 @@
   { "keys": ["command+b"], "command": "move_to", "args": {"to": "bol", "extend": false} },
   { "keys": ["command+e"], "command": "move_to", "args": {"to": "eol", "extend": false} },
   { "keys": ["command+ctrl+b"], "command": "move_to", "args": {"to": "bof", "extend": false} },
-  { "keys": ["command+ctrl+e"], "command": "move_to", "args": {"to": "eof", "extend": false} }
+  { "keys": ["command+ctrl+e"], "command": "move_to", "args": {"to": "eof", "extend": false} },
+  { "keys": ["ctrl+b"], "command": "toggle_side_bar" },
+  { "keys": ["alt+w"], "command": "toggle_setting", "args": {"setting": "word_wrap"} }
 ]

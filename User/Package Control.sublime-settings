@@ -2,9 +2,15 @@
 	"auto_upgrade_last_run": null,
 	"installed_packages":
 	[
+		"Coffee Formatter",
+		"CoffeeScript",
 		"ERB Insert and Toggle Commands",
 		"Package Control",
-		"RubyTest"
+		"R Tools",
+		"ruby-slim.tmbundle",
+		"RubyTest",
+		"Sass",
+		"Shell Turtlestein"
 	],
 	"repositories":
 	[

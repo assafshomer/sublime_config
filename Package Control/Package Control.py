@@ -1027,6 +1027,8 @@ class PackageProvider(PlatformComparator):
                 download['url'] = re.sub(
                     '^(https://nodeload.github.com/[^/]+/[^/]+/)zipball(/.*)$',
                     '\\1zip\\2', download['url'])
+                download['url'] = download['url'].replace(
+                    'nodeload.github.com', 'codeload.github.com')
                 rewritten_downloads.append(download)
 
             info = {
@@ -1148,10 +1150,10 @@ class GitHubPackageProvider(NonCachingProvider):
         if commit_info == False:
             return False
 
-        # We specifically use nodeload.github.com here because the download
+        # We specifically use codeload.github.com here because the download
         # URLs all redirect there, and some of the downloaders don't follow
         # HTTP redirect headers
-        download_url = 'https://nodeload.github.com/' + \
+        download_url = 'https://codeload.github.com/' + \
             repo_info['owner']['login'] + '/' + \
             repo_info['name'] + '/zip/' + urllib.quote(branch)
 
@@ -1251,10 +1253,10 @@ class GitHubUserProvider(NonCachingProvider):
                 'downloads': [
                     {
                         'version': utc_timestamp,
-                        # We specifically use nodeload.github.com here because
+                        # We specifically use codeload.github.com here because
                         # the download URLs all redirect there, and some of the
                         # downloaders don't follow HTTP redirect headers
-                        'url': 'https://nodeload.github.com/' + \
+                        'url': 'https://codeload.github.com/' + \
                             package_info['owner']['login'] + '/' + \
                             package_info['name'] + '/zip/master'
                     }
@@ -1373,6 +1375,12 @@ class NonCleanExitError(Exception):
         return repr(self.returncode)
 
 
+class NonHttpError(Exception):
+    """If a downloader had a non-clean exit, but it was not due to an HTTP error"""
+
+    pass
+
+
 class Downloader():
     """
     A base downloader that actually performs downloading URLs
@@ -1405,11 +1413,11 @@ class Downloader():
 
         cert_info = certs_list.get(domain)
         if cert_info:
-            cert_match = self.locate_cert(certs_dir, cert_info[0], cert_info[1])
+            cert_match = self.locate_cert(certs_dir, cert_info[0], cert_info[1], domain, timeout)
 
         wildcard_info = certs_list.get('*')
         if wildcard_info:
-            cert_match = self.locate_cert(certs_dir, wildcard_info[0], wildcard_info[1]) or cert_match
+            cert_match = self.locate_cert(certs_dir, wildcard_info[0], wildcard_info[1], domain, timeout) or cert_match
 
         if not cert_match:
             print '%s: No CA certs available for %s.' % (__name__, domain)
@@ -1417,7 +1425,7 @@ class Downloader():
 
         return ca_bundle_path
 
-    def locate_cert(self, certs_dir, cert_id, location):
+    def locate_cert(self, certs_dir, cert_id, location, domain, timeout):
         """
         Makes sure the SSL cert specified has been added to the CA cert
         bundle that is present on the machine
@@ -1442,7 +1450,7 @@ class Downloader():
         if not os.path.exists(cert_path):
             if str(location) != '':
                 if re.match('^https?://', location):
-                    contents = self.download_cert(cert_id, location)
+                    contents = self.download_cert(cert_id, location, domain, timeout)
                 else:
                     contents = self.load_cert(cert_id, location)
                 if contents:
@@ -1451,7 +1459,7 @@ class Downloader():
             return False
         return True
 
-    def download_cert(self, cert_id, url):
+    def download_cert(self, cert_id, url, domain, timeout):
         """
         Downloads CA cert(s) from a URL
 
@@ -1766,6 +1774,7 @@ class WgetDownloader(CliDownloader):
 
     def __init__(self, settings):
         self.settings = settings
+        self.debug = settings.get('debug')
         self.wget = self.find_binary('wget')
 
     def download(self, url, error_message, timeout, tries):
@@ -1795,8 +1804,8 @@ class WgetDownloader(CliDownloader):
 
         self.tmp_file = tempfile.NamedTemporaryFile().name
         command = [self.wget, '--connect-timeout=' + str(int(timeout)), '-o',
-            self.tmp_file, '--save-headers', '-O', '-', '-U',
-            self.settings.get('user_agent'), '--content-on-error', '--header',
+            self.tmp_file, '-O', '-', '-U',
+            self.settings.get('user_agent'), '--header',
             # Don't be alarmed if the response from the server does not select
             # one of these since the server runs a relatively new version of
             # OpenSSL which supports compression on the SSL layer, and Apache
@@ -1811,9 +1820,10 @@ class WgetDownloader(CliDownloader):
                 return False
             command.append(u'--ca-certificate=' + bundle_path)
 
-        debug = self.settings.get('debug')
-        if debug:
-            command.extend(['-d', '-q'])
+        if self.debug:
+            command.append('-d')
+        else:
+            command.append('-S')
 
         http_proxy = self.settings.get('http_proxy')
         https_proxy = self.settings.get('https_proxy')
@@ -1825,7 +1835,7 @@ class WgetDownloader(CliDownloader):
         if proxy_password:
             command.append(u"--proxy-password=%s" % proxy_password)
 
-        if debug:
+        if self.debug:
             print u"%s: Wget Debug Proxy" % __name__
             print u"  http_proxy: %s" % http_proxy
             print u"  https_proxy: %s" % https_proxy
@@ -1844,135 +1854,166 @@ class WgetDownloader(CliDownloader):
             try:
                 result = self.execute(command)
 
-                (headers, result) = re.split('\r?\n\r?\n', result, 1)
-                encoding = None
-                for header in headers.splitlines():
-                    if header.lower()[0:17] == 'content-encoding:':
-                        encoding = header.lower()[17:].strip()
+                general, headers = self.parse_output()
+                encoding = headers.get('content-encoding')
+                if encoding:
+                    result = self.decode_response(encoding, result)
 
-                result = self.decode_response(encoding, result)
-
-                if debug:
-                    self.print_debug(url)
-
-                self.clean_tmp_file()
                 return result
 
             except (NonCleanExitError) as (e):
 
-                if debug:
-                    self.print_debug(url)
-                else:
-                    self.handle_rate_limit(e.stdout, url)
+                try:
+                    general, headers = self.parse_output()
+                    self.handle_rate_limit(headers, url)
 
-                error_line = ''
-                with open(self.tmp_file) as f:
-                    for line in list(f):
-                        if re.search('ERROR[: ]|failed: ', line):
-                            error_line = line
-                            break
-
-                        # Handles situation when debug mode is on, and emulates
-                        # the error message from non-debug mode
-                        if debug:
-                            match = re.search('^HTTP/\d\.\d (\d+) (.*)', line,
-                                re.I)
-                            if match:
-                                error_line = 'WGET ERROR %s: %s' % (
-                                    match.group(1), match.group(2))
-                                break
-
-                            # Handles proxy errors
-                            match = re.search('^proxy responded with: \[' + \
-                                'HTTP/\d\.\d (\d+) (.*)', line, re.I)
-                            if match:
-                                error_line = 'WGET ERROR %s: %s' % (
-                                    match.group(1), match.group(2))
-                                break
-
-                status_code_regex = re.compile('^.*ERROR (\d+):(.*)$', re.S)
-                status_match = re.search(status_code_regex, error_line)
-                if status_match != None:
-                    if status_match.group(1) == '503':
+                    if general['status'] == '503':
                         # GitHub and BitBucket seem to rate limit via 503
                         print ('%s: Downloading %s was rate limited' +
                             ', trying again') % (__name__, url)
                         continue
-                    error_string = 'HTTP error ' + status_match.group(1) + \
-                        status_match.group(2).rstrip()
-                else:
-                    error_string = re.sub('^.*?(ERROR:? |failed: )',
-                        '\\1', error_line)
+
+                    error_string = 'HTTP error %s %s' % (general['status'],
+                        general['message'])
+
+                except (NonHttpError) as (e):
+
+                    error_string = unicode_from_os(e)
+
                     # GitHub and BitBucket seem to time out a lot
                     if error_string.find('timed out') != -1:
                         print ('%s: Downloading %s timed out, ' +
                             'trying again') % (__name__, url)
                         continue
 
-                error_string = re.sub('\\.?\s*\n\s*$', '', error_string)
-                print '%s: %s %s downloading %s.' % (__name__, error_message,
-                    error_string, url)
-            self.clean_tmp_file()
+                print (u'%s: %s %s downloading %s.' % (__name__, error_message,
+                    error_string, url)).encode('UTF-8')
+
             break
         return False
 
-    def handle_rate_limit(self, output, url):
-        limit_remaining = 1
-        limit = 1
-
-        for line in output.splitlines():
-            if line.strip() == '':
-                break
-            if line.lower()[0:22] == 'x-ratelimit-remaining:':
-                limit_remaining = line.lower()[22:].strip()
-            if line.lower()[0:18] == 'x-ratelimit-limit:':
-                limit = line.lower()[18:].strip()
-
-        if str(limit_remaining) == '0':
-            hostname = urlparse.urlparse(url).hostname
-            self.clean_tmp_file()
-            raise RateLimitException(hostname, limit)
-
-    def print_debug(self, url):
+    def parse_output(self):
         with open(self.tmp_file, 'r') as f:
-            debug_content = f.read()
+            output = f.read().splitlines()
+        self.clean_tmp_file()
 
-        limit_remaining = 1
-        limit = 1
+        error = None
+        header_lines = []
+        if self.debug:
+            section = 'General'
+            last_section = None
+            for line in output:
+                if section == 'General':
+                    if self.skippable_line(line):
+                        continue
 
-        section = 'General'
-        last_section = None
-        for line in debug_content.splitlines():
-            if line == '---request begin---':
-                section = 'Write'
-                continue
-            elif line == '---request end---':
-                continue
-            elif line == '---response begin---':
-                section = 'Read'
-                continue
-            elif line == '---response end---':
-                section = 'General'
-                continue
+                # Skip blank lines
+                if line.strip() == '':
+                    continue
 
-            if line.strip() == '':
-                continue
+                # Error lines
+                if line[0:5] == 'wget:':
+                    error = line[5:].strip()
+                if line[0:7] == 'failed:':
+                    error = line[7:].strip()
 
-            if section != last_section:
-                print "%s: Wget HTTP Debug %s" % (__name__, section)
+                if line == '---request begin---':
+                    section = 'Write'
+                    continue
+                elif line == '---request end---':
+                    section = 'General'
+                    continue
+                elif line == '---response begin---':
+                    section = 'Read'
+                    continue
+                elif line == '---response end---':
+                    section = 'General'
+                    continue
 
-            if section == 'Read':
-                if line.lower()[0:22] == 'x-ratelimit-remaining:':
-                    limit_remaining = line.lower()[22:].strip()
-                if line.lower()[0:18] == 'x-ratelimit-limit:':
-                    limit = line.lower()[18:].strip()
+                if section != last_section:
+                    print "%s: Wget HTTP Debug %s" % (__name__, section)
 
-            print '  ' + line
-            last_section = section
+                if section == 'Read':
+                    header_lines.append(line)
+
+                print '  ' + line
+                last_section = section
+
+        else:
+            for line in output:
+                if self.skippable_line(line):
+                    continue
+
+                # Check the resolving and connecting to lines for errors
+                if re.match('(Resolving |Connecting to )', line):
+                    failed_match = re.search(' failed: (.*)$', line)
+                    if failed_match:
+                        error = failed_match.group(1).strip()
+
+                # Error lines
+                if line[0:5] == 'wget:':
+                    error = line[5:].strip()
+                if line[0:7] == 'failed:':
+                    error = line[7:].strip()
+
+                if line[0:2] == '  ':
+                    header_lines.append(line.lstrip())
+
+        if error:
+            raise NonHttpError(error)
+
+        return self.parse_headers(header_lines)
+
+    def skippable_line(self, line):
+        # Skip date lines
+        if re.match('--\d{4}-\d{2}-\d{2}', line):
+            return True
+        if re.match('\d{4}-\d{2}-\d{2}', line):
+            return True
+        # Skip HTTP status code lines since we already have that info
+        if re.match('\d{3} ', line):
+            return True
+        # Skip Saving to and progress lines
+        if re.match('(Saving to:|\s*\d+K)', line):
+            return True
+        # Skip notice about ignoring body on HTTP error
+        if re.match('Skipping \d+ byte', line):
+            return True
+
+    def parse_headers(self, output=None):
+        if not output:
+            with open(self.tmp_file, 'r') as f:
+                output = f.read().splitlines()
+            self.clean_tmp_file()
+
+        general = {
+            'version': '0.9',
+            'status':  '200',
+            'message': 'OK'
+        }
+        headers = {}
+        for line in output:
+            # When using the -S option, headers have two spaces before them,
+            # additionally, valid headers won't have spaces, so this is always
+            # a safe operation to perform
+            line = line.lstrip()
+            if line.find('HTTP/') == 0:
+                match = re.match('HTTP/(\d\.\d)\s+(\d+)\s+(.*)$', line)
+                general['version'] = match.group(1)
+                general['status']  = match.group(2)
+                general['message'] = match.group(3)
+            else:
+                name, value = line.split(':', 1)
+                headers[name.lower()] = value.strip()
+
+        return (general, headers)
+
+    def handle_rate_limit(self, headers, url):
+        limit_remaining = headers.get('x-ratelimit-remaining', '1')
+        limit = headers.get('x-ratelimit-limit', '1')
 
         if str(limit_remaining) == '0':
             hostname = urlparse.urlparse(url).hostname
-            self.clean_tmp_file()
             raise RateLimitException(hostname, limit)
 
 
@@ -2777,10 +2818,19 @@ class PackageManager():
                     if provider.get_packages(repo) == False:
                         continue
                     packages_cache_key = repo + '.packages'
+
+                    # Handle the transition from nodeload to codeload
+                    channel_packages = provider.get_packages(repo)
+                    for _name in channel_packages:
+                        package_info = channel_packages[_name]
+                        for download in package_info['downloads']:
+                            download['url'] = download['url'].replace(
+                                'nodeload.github.com', 'codeload.github.com')
+
                     _channel_repository_cache[packages_cache_key] = {
                         'time': time.time() + self.settings.get('cache_length',
                             300),
-                        'data': provider.get_packages(repo)
+                        'data': channel_packages
                     }
 
                 # Have the local name map override the one from the channel
@@ -2907,6 +2957,14 @@ class PackageManager():
             if repository_packages == False:
                 continue
             cache_key = downloader.repo + '.packages'
+
+            # Handle the transition from nodeload to codeload
+            for _name in repository_packages:
+                package_info = repository_packages[_name]
+                for download in package_info['downloads']:
+                    download['url'] = download['url'].replace(
+                        'nodeload.github.com', 'codeload.github.com')
+
             _channel_repository_cache[cache_key] = {
                 'time': time.time() + self.settings.get('cache_length', 300),
                 'data': repository_packages
@@ -4343,18 +4401,19 @@ class RemovePackageCommand(sublime_plugin.WindowCommand,
             return
         package = self.package_list[picked][0]
 
+        settings = sublime.load_settings(preferences_filename())
+        ignored = settings.get('ignored_packages')
+        if not ignored:
+            ignored = []
+
         # Don't disable Package Control so it does not get stuck disabled
         if package != 'Package Control':
-            settings = sublime.load_settings(preferences_filename())
-            ignored = settings.get('ignored_packages')
-            if not ignored:
-                ignored = []
             if not package in ignored:
                 ignored.append(package)
                 settings.set('ignored_packages', ignored)
                 sublime.save_settings(preferences_filename())
+            ignored.remove(package)
 
-        ignored.remove(package)
         thread = RemovePackageThread(self.manager, package,
             ignored)
         thread.start()
